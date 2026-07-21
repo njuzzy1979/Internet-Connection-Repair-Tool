@@ -1,0 +1,7 @@
+# 日志目录 — 保留目录结构，忽略所有日志内容
+logs/*
+!logs/.gitkeep
+
+# 备份目录 — 保留目录结构，忽略所有备份内容
+backups/*
+!backups/.gitkeep

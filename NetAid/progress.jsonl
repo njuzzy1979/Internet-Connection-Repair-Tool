@@ -1,0 +1,9 @@
+{"phase":"init","event":"orchestrator.start","ts":"2026-07-21T10:00:00+08:00","project":"NetAid","design_doc":"e:/Program/360卸载/断网急救箱_最终设计文档.md","type":"greenfield"}
+{"phase":"wave1","event":"dispatched","ts":"2026-07-21T10:05:00+08:00","files":["lib/Utils.ps1","lib/Logger.ps1","lib/UI.ps1","lib/Parallel.ps1","NetAid.bat","README.md"],"agents":6,"mode":"parallel"}
+{"phase":"precheck","event":"g2_skip","ts":"2026-07-21T10:06:00+08:00","reason":"项目未注册 domain-guard，无 CLAUDE.md，G2 全程跳过"}
+{"phase":"wave2","event":"dispatched","ts":"2026-07-21T10:12:00+08:00","files":["modules/M01_Adapter.ps1","modules/M02_IP_DHCP.ps1","modules/M03_DNS.ps1","modules/M04_Route.ps1","modules/M05_Firewall.ps1","modules/M06_Proxy.ps1","modules/M07_ThirdParty.ps1","modules/M08_Winsock.ps1","modules/M09_Hosts.ps1","modules/M10_IPConflict.ps1"],"agents":10,"mode":"parallel"}
+{"phase":"wave3","event":"dispatched","ts":"2026-07-21T10:18:00+08:00","files":["NetAid.ps1"],"agents":1,"description":"主脚本集成 - 融合4lib+10模块+状态机+修复引擎"}
+{"phase":"wave4","event":"g1_check","ts":"2026-07-21T10:30:00+08:00","status":"15/15 .ps1 files syntax pass, encoding verified, PS 5.1 compatible"}
+{"phase":"wave4","event":"g4_e2e","ts":"2026-07-21T10:35:00+08:00","status":"Full diagnosis: 10/10 modules, 0 crashes, 14 problems, 20.1s"}
+{"phase":"wave4","event":"p0_fixes","ts":"2026-07-21T10:35:00+08:00","issues":[{"id":"P0-1","description":"$Script:Version与[switch]$Version参数作用域冲突","fix":"重命名$Script:Version→$Script:ScriptVersion(5处)"},{"id":"P0-2","description":"StrictMode下hashtable缺失key的dot-notation导致crash","fix":"改用ContainsKey+index访问(5处)"}]}
+{"phase":"done","event":"orchestrator.end","ts":"2026-07-21T10:40:00+08:00","total_files":16,"total_lines":13179,"agents_dispatched":17,"p0_found":2,"p0_fixed":2}
