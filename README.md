@@ -39,6 +39,140 @@ cd NetAid
 | M10 | IP冲突 | ARP表IP-MAC冲突、系统事件日志(EventID 4199) |
 | M11 | 深度残留 | NDIS过滤驱动残留检测、孤儿驱动清理 (v1.0.0 新增) |
 
+## 典型故障案例分析：360 安全卫士卸载后全网断网
+
+### 故障现象
+
+用户卸载 360 安全卫士后重启，所有网卡（有线+无线）均无法获取 IP 地址，表现为 `ipconfig` 显示 **APIPA 地址 (169.254.x.x)**，无法访问互联网和局域网。
+
+> 此案例同样适用于**火绒、腾讯电脑管家、金山毒霸**等同类安全软件的卸载后断网问题。
+
+### 根因分析：360 对网络协议栈的深度侵入
+
+360 安全卫士通过以下三层机制深度嵌入 Windows 网络协议栈：
+
+#### 第一层：NDIS 内核过滤驱动（最关键）
+
+360 安装了大量内核级 NDIS（Network Driver Interface Specification）过滤驱动，直接注册在 Windows 网络驱动绑定链中。已知的 360 网络相关驱动包括：
+
+| 驱动文件名 | 功能 | 影响的网络层 |
+|-----------|------|------------|
+| `360netmon.sys` | 网络流量监控 | NDIS 过滤层 |
+| `360AntiHacker64.sys` | 防黑客攻击 | NDIS 过滤层 |
+| `360AntiAttack64.sys` | 防网络攻击 | NDIS 过滤层 |
+| `360AntiFraud64.sys` | 反欺诈检测 | NDIS 过滤层 |
+| `360Box64.sys` | 核心驱动框架 | 驱动总线层 |
+| `BAPIDRV64.sys` | BAPI 辅助驱动 | NDIS 过滤层 |
+| `360FsFlt.sys` | 文件系统过滤 | 文件系统层 |
+
+这些驱动的注册表项位于 `HKLM\SYSTEM\CurrentControlSet\Services\`，其 **FilterClass** 属性使其被 Windows 视为合法的 NDIS 轻量过滤驱动 (LWF)，在网卡初始化时强制参与绑定链。
+
+#### 第二层：WFP（Windows 过滤平台）Callout 驱动
+
+360 向 WFP 引擎注册了多个 Provider（如 `360 Internet Security`、`360Safe`、`360 Total Security`），在应用层 (ALE) 和传输层插入过滤规则，可拦截/检查所有 TCP/UDP 数据包。
+
+#### 第三层：Winsock LSP（分层服务提供者）
+
+360 可能向 Winsock 目录注入 LSP 条目，在 Socket API 层面拦截网络通信。
+
+### 卸载后为什么断网：孤儿驱动锁死绑定链
+
+**关键问题在于 360 的卸载程序存在缺陷**：
+
+1. **驱动文件被删除**：`C:\Windows\System32\drivers\360netmon.sys` 等 `.sys` 文件被卸载程序删除
+2. **注册表残留**：但 `HKLM\SYSTEM\CurrentControlSet\Services\360netmon` 等注册表键**未被清理**
+3. **FilterClass 仍然指向已删除文件**：注册表中的 `ImagePath` 指向不存在的驱动文件，但 `FilterClass` 属性仍让 Windows 将其视为合法 NDIS 过滤驱动
+
+**断网机制**：
+
+```
+网卡初始化
+  └→ NDIS 绑定引擎遍历 FilterClass 服务列表
+       └→ 读取 360netmon → ImagePath → 文件不存在！
+            └→ 绑定链在此处断裂
+                 └→ DHCP 请求无法通过 NDIS 栈发出
+                      └→ DHCP 超时 → APIPA 169.254.x.x
+                           └→ 全网卡断网（有线/无线均受影响）
+```
+
+NDIS 过滤驱动是**全局性**的——一个错误的 FilterClass 条目可以**影响所有网络适配器**，这正是卸载 360 后"所有网卡一起断"的根本原因。
+
+### NetAid 的检测-修复全链路
+
+#### 检测阶段
+
+NetAid 的 3 个模块从不同层面捕捉 360 残留：
+
+| 模块 | 检测项 | 发现 360 残留的典型输出 |
+|------|--------|----------------------|
+| **M07** 第三方残留 | 扫描 `HKLM\...\Services` 中 140+ 黑名单驱动 | `360netmon` 注册表存在、文件不存在 → 幽灵残留 |
+| **M02** IP/DHCP | 检查是否为 APIPA 地址 | 169.254.x.x → `APIPA_DETECTED` |
+| **M11** 深度残留 | 扫描 NDIS FilterClass 注册表项 | 孤儿 FilterClass 条目 → DHCP 依赖链损坏 |
+
+#### 修复阶段（按执行顺序）
+
+修复引擎 `Build-RepairPlan` 自动编排多模块协同修复，并支持合并去重：
+
+```
+┌─────────────────────────────────────────────────────┐
+│ 步骤1: M11 深度清理 (L4a)                             │
+│   ├─ 备份注册表 Service 键到 backups/                 │
+│   ├─ 删除孤儿 NDIS 驱动注册表键 (360netmon 等)        │
+│   ├─ 禁用但仍存文件的可疑驱动 (Start=4)                │
+│   ├─ 重命名残留 .sys 文件为 .sys.netaid_bak           │
+│   └─ 修复 DHCP 依赖链 (AFD Start=1, Dhcp Start=2)     │
+├─────────────────────────────────────────────────────┤
+│ 步骤2: M07 第三方残留清理 (L4a)                        │
+│   ├─ 活跃残留驱动 → Set Start=4 禁用                  │
+│   ├─ 幽灵残留驱动 → 删除注册表 Service 键             │
+│   └─ LSP/WFP 异常 → 记录，交由后续模块覆盖            │
+├─────────────────────────────────────────────────────┤
+│ 步骤3: M08 Winsock/协议栈重置 (L3)                     │
+│   ├─ netsh winsock reset  → 重建 Winsock 目录        │
+│   ├─ netsh int ip reset   → 重置 TCP/IP 协议栈       │
+│   ├─ netsh int tcp reset  → 重置 TCP 全局参数        │
+│   └─ netsh winhttp reset proxy → 清除代理设置        │
+├─────────────────────────────────────────────────────┤
+│ 步骤4: M02 DHCP 续租 (L2)                              │
+│   ├─ ipconfig /release → 释放当前 APIPA              │
+│   └─ ipconfig /renew  → 向 DHCP 服务器请求新 IP      │
+├─────────────────────────────────────────────────────┤
+│ 步骤5: 重启生效                                        │
+│   NDIS 绑定链在重启时重建，不再包含已清理的 360 驱动     │
+│   → 网卡正常获取 DHCP IP，网络恢复                     │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 修复计划的智能合并去重
+
+NetAid 的修复引擎理解修复操作之间的覆盖关系：
+
+- M08（Winsock 重置）**覆盖** M07 的 LSP 清理 → M07 可能被跳过
+- M05（防火墙重置）**覆盖** M07 的 WFP 过滤器清理 → M07 可能被跳过
+- 仅当 LSP **且** WFP 都被其他模块覆盖时，M07 才完全不执行
+
+这避免了重复的 `netsh` 操作和多次重启需求。
+
+### 同类安全软件对比
+
+360 并非唯一有此问题的安全软件。NetAid 的黑名单覆盖了：
+
+| 安全软件 | 典型残留驱动 | 网络影响机制 |
+|---------|-------------|------------|
+| **火绒** | `hrwfpdrv.sys`（WFP 过滤）、`sysdiag.sys` | 同 360，NDIS + WFP 双重拦截 |
+| **腾讯管家** | `TSNetMon.sys`、`TNetMon64.sys` | NDIS 流量监控驱动残留 |
+| **金山毒霸** | `kisknl.sys`、`kmodurl.sys` | 内核+URL 过滤驱动残留 |
+| **Kaspersky** | `klim6.sys`（NDIS 6.x）、`klwfp.sys`（WFP） | NDIS + WFP 双重拦截 |
+| **ESET** | `epfwwfp.sys`（WFP 防火墙）、`eamonm.sys` | WFP 过滤残留 |
+
+### 总结
+
+**360 卸载后断网的本质是：安全软件的"深度网络防护"机制在内核层面劫持了网络数据包路径，卸载时未能正确还原。残留的注册表项让 Windows 继续尝试加载不存在的驱动，导致 NDIS 绑定链断裂 → DHCP 失败 → APIPA → 全网断网。**
+
+修复的关键不是简单的 `ipconfig /renew` 或 DNS 刷新，而是**从注册表中清除孤儿 NDIS 过滤驱动引用，然后重置整个 Winsock/TCP-IP 协议栈，使 Windows 在重启后重建干净的网络绑定链**。这正是 NetAid 多模块协同修复的核心价值。
+
+---
+
 ### 修复分级
 
 | 级别 | 风险 | 自动/确认 | 典型操作 |

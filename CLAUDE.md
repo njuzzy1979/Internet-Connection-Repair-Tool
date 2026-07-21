@@ -155,3 +155,52 @@ NetAid.bat (启动器，ASCII)
 - `NetAid_CLI_Design.md` — CLI 设计
 
 修改核心逻辑前应先查阅相关设计文档。
+
+## 典型故障机制分析：安全软件（360/火绒/管家等）卸载后断网
+
+### 问题本质
+
+安全软件通过 **NDIS 内核过滤驱动 + WFP Callout + Winsock LSP** 三层机制嵌入 Windows 网络协议栈。卸载程序常**无法彻底清理**注册表残留，导致 NDIS 绑定链断裂。
+
+### 根因链路（以 360 为例）
+
+```
+360 卸载 → .sys 文件被删除，但注册表 Service 键残留
+  → HKLM\...\Services\360netmon 仍注册为 FilterClass（NDIS LWF）
+    → 网卡初始化时 NDIS 尝试加载 360netmon → 文件不存在
+      → 绑定链断裂 → DHCP 报文无法通过 NDIS 栈
+        → DHCP 超时 → APIPA (169.254.x.x) → 全网卡断网
+```
+
+关键特征：**所有网卡同时断网**（有线+无线），因为 NDIS 过滤驱动是全局的。
+
+### NetAid 检测链路（3 模块协作）
+
+| 模块 | 检测机制 | 发现的典型问题 |
+|------|----------|---------------|
+| M07 第三方残留 | 遍历 `HKLM\...\Services`，匹配 140+ 黑名单驱动 | 360 驱动注册表残留（文件已删除/仍存在） |
+| M02 IP/DHCP | `Get-NetIPAddress` 扫描 Up 适配器 | APIPA (169.254.x.x) 地址 |
+| M11 深度残留 | 扫描 `FilterClass` 注册表项 + DHCP 依赖链 | 孤儿 NDIS 过滤驱动、AFD/Dhcp 配置异常 |
+
+### 修复链路（4 模块协同，含合并去重）
+
+```
+M11 (L4a) → 删除孤儿 NDIS 过滤驱动注册表、禁用活跃残留、处理 .sys 文件
+M07 (L4a) → 禁用残留驱动(Start=4)、删除幽灵注册表、记录 LSP/WFP 异常
+M08 (L3)  → netsh winsock/int ip/int tcp/winhttp reset（覆盖 M07 LSP 清理）
+M02 (L2)  → ipconfig /release → /renew、DHCP 服务启动、MTU 修复
+→ 重启 → NDIS 绑定链重建，网络恢复
+```
+
+**合并去重规则**：
+- M08（Winsock 重置）覆盖 M07 的 LSP 清理
+- M05（防火墙重置）覆盖 M07 的 WFP 过滤器清理
+- 仅当 LSP **且** WFP 都被覆盖时 M07 才完全跳过
+
+### 开发注意事项
+
+- 新增安全软件驱动黑名单时，同步更新 `Utils.ps1` 的 `$Script:KnownResidueDrivers`、`$Script:SuspiciousWfpProviders`，以及 `M11_DeepClean.ps1` 的 `$Script:KnownNdisFilterServices`、`$Script:ResidueSysPatterns`
+- M11 的孤儿 FilterClass 检测是**断网根因定位的核心**——`FilterClass` 非空 + `ImagePath` 文件不存在 + `Start ≠ 4` = 孤儿（最危险）
+- 修复后**必须重启**才能让 NDIS 绑定链重建，仅 `ipconfig /renew` 无效
+- 安全保护：修复前强制备份注册表到 `backups/`，数字签名为 Microsoft 的驱动**绝不能操作**
+- 参见 README.md "典型故障案例分析"章节获取面向用户的完整说明
